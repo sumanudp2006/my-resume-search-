@@ -133,10 +133,11 @@ Context: {context}
                 # NOTE: If gpt-5-nano isn't available in your environment/account, change model here.
                 llm = ChatOpenAI(model="gpt-5-nano", temperature=0.0, max_tokens=1024)
 
-                # RetrievalQA chain using the custom prompt. return_source_documents=True to see provenance.
+                # RetrievalQA chain using the custom prompt. return_source_documents=True so chain can
+                # still access sources internally — but we will not display them in the UI.
                 qa = RetrievalQA.from_chain_type(
                     llm=llm,
-                    chain_type="stuff",              # "stuff" is simplest: it stuffs context into prompt
+                    chain_type="stuff",
                     retriever=retriever,
                     return_source_documents=True,
                     chain_type_kwargs={"prompt": prompt},
@@ -146,25 +147,13 @@ Context: {context}
                 result = qa({"query": query})
                 # langchain variations return "result" or "answer"
                 answer = result.get("result") or result.get("answer") or ""
-                source_docs = result.get("source_documents", [])
+                answer = answer.strip()
 
-                # Show the answer
+                # --- UI: show ONLY the answer (no source passages) ---
                 st.markdown("### Answer")
-                st.write(answer.strip())
+                # If the model follows the template and can't answer from context, it should return "Don't know".
+                # We display whatever the model returned (honest behavior enforced by the prompt).
+                st.write(answer if answer else "Don't know")
 
-                # Show the sources (short excerpts + metadata)
-                if source_docs:
-                    st.markdown("#### Source passages (top results)")
-                    for i, src in enumerate(source_docs, 1):
-                        content = getattr(src, "page_content", "")
-                        metadata = getattr(src, "metadata", {}) or {}
-                        page = metadata.get("page", "unknown")
-                        source = metadata.get("source", "unknown")
-                        st.markdown(f"**Source {i} — {source} (page {page})**")
-                        st.text(content[:800].strip())
-                        if metadata:
-                            st.caption(f"metadata: {metadata}")
-                else:
-                    st.write("No supporting passages returned by retriever.")
             except Exception as e:
                 st.error(f"Search / QA failed: {e}")
