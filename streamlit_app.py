@@ -19,9 +19,11 @@ elif "OPENAI_API_KEY" in st.secrets:
 # Now safe to import langchain/OpenAI modules
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_core.documents import Document
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import FAISS
+from langchain.prompts import PromptTemplate
+from langchain.chains import RetrievalQA
 
 st.set_page_config(page_title="Resume Chat (FAISS)", layout="wide")
 
@@ -42,10 +44,15 @@ def get_openai_embeddings():
 
 # Cache building the index; inputs are hashable (path string and file_hash)
 @st.cache_resource
-def build_vectorstore_from_path(path: str, file_hash: str):
+def build_vectorstore_from_path(path: str, file_hash: str, source_name: str):
     loader = PyMuPDFLoader(file_path=path)
     pages = loader.load()
-    docs = [Document(page_content=p.page_content, id=i+1) for i, p in enumerate(pages)]
+
+    # Create Documents with metadata (page numbers + source filename) for provenance
+    docs = [
+        Document(page_content=p.page_content, metadata={"page": i + 1, "source": source_name})
+        for i, p in enumerate(pages)
+    ]
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
@@ -70,9 +77,6 @@ def load_vectorstore_if_exists(file_hash: str):
         return FAISS.load_local(persist_dir, embeddings, allow_dangerous_deserialization=True)
     return None
 
-# st.title("Resume QA — LangChain + FAISS + OpenAI")  # suman commented
-
-
 # Friendly check for API key
 if not os.environ.get("OPENAI_API_KEY"):
     st.error(
@@ -87,7 +91,7 @@ if uploaded:
     st.title(f"Chat with your uploaded file - {uploaded.name}")
 else:
     st.title("Upload a file to start chatting")
-    
+
 if uploaded:
     file_bytes = uploaded.getbuffer()
     file_hash = hashlib.md5(file_bytes).hexdigest()
@@ -98,23 +102,69 @@ if uploaded:
     if not vector_store:
         with st.spinner("Indexing resume (first time takes longest)..."):
             try:
-                persist_dir = build_vectorstore_from_path(tmp_path, file_hash)
+                persist_dir = build_vectorstore_from_path(tmp_path, file_hash, source_name=uploaded.name)
                 vector_store = load_vectorstore_if_exists(file_hash)
             except Exception as e:
                 st.error(f"Indexing failed: {e}")
                 st.stop()
 
+    # Strict template to avoid fabrication
+    template = """
+You are a helpful assistant answering all the user questions.
+Answer the user questions based on the context provided.
+If you do not know the answer, please say "Don't know". 
+Do not fabricate the answer at any cost.
+
+Question: {question}
+Context: {context}
+"""
+    prompt = PromptTemplate(template=template, input_variables=["question", "context"])
+
     query = st.text_input("Ask a question about this resume:")
     if st.button("Search") and query.strip():
-        try:
-            docs = vector_store.similarity_search(query, k=5)
-        except Exception as e:
-            st.error(f"Search error: {e}")
-            docs = []
-
-        if not docs:
-            st.write("No similar passages found.")
+        if not vector_store:
+            st.error("Vector store not loaded.")
         else:
-            for i, d in enumerate(docs, 1):
-                content = getattr(d, "page_content", str(d))
-                st.markdown(f"**Result {i}** — {content[:800]}")
+            try:
+                # Build a retriever (use top k results)
+                retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 5})
+
+                # Initialize the LLM with deterministic settings to minimize hallucination
+                # NOTE: If gpt-5-nano isn't available in your environment/account, change model here.
+                llm = ChatOpenAI(model="gpt-5-nano", temperature=0.0, max_tokens=1024)
+
+                # RetrievalQA chain using the custom prompt. return_source_documents=True to see provenance.
+                qa = RetrievalQA.from_chain_type(
+                    llm=llm,
+                    chain_type="stuff",              # "stuff" is simplest: it stuffs context into prompt
+                    retriever=retriever,
+                    return_source_documents=True,
+                    chain_type_kwargs={"prompt": prompt},
+                )
+
+                # Run the chain
+                result = qa({"query": query})
+                # langchain variations return "result" or "answer"
+                answer = result.get("result") or result.get("answer") or ""
+                source_docs = result.get("source_documents", [])
+
+                # Show the answer
+                st.markdown("### Answer")
+                st.write(answer.strip())
+
+                # Show the sources (short excerpts + metadata)
+                if source_docs:
+                    st.markdown("#### Source passages (top results)")
+                    for i, src in enumerate(source_docs, 1):
+                        content = getattr(src, "page_content", "")
+                        metadata = getattr(src, "metadata", {}) or {}
+                        page = metadata.get("page", "unknown")
+                        source = metadata.get("source", "unknown")
+                        st.markdown(f"**Source {i} — {source} (page {page})**")
+                        st.text(content[:800].strip())
+                        if metadata:
+                            st.caption(f"metadata: {metadata}")
+                else:
+                    st.write("No supporting passages returned by retriever.")
+            except Exception as e:
+                st.error(f"Search / QA failed: {e}")
