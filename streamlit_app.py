@@ -70,11 +70,7 @@ def load_vectorstore_if_exists(file_hash: str):
         return FAISS.load_local(persist_dir, embeddings, allow_dangerous_deserialization=True)
     return None
 
-# st.title("Resume QA — LangChain + FAISS + OpenAI")
-if uploaded:
-    st.title(f"Chat with your uploaded file - {uploaded.name}")
-else:
-    st.title("Upload a file to start chatting")
+# st.title("Resume QA — LangChain + FAISS + OpenAI")  # suman commented
 
 
 # Friendly check for API key
@@ -87,6 +83,11 @@ if not os.environ.get("OPENAI_API_KEY"):
     st.stop()
 
 uploaded = st.file_uploader("Upload resume (PDF)", type=["pdf"])
+if uploaded:
+    st.title(f"Chat with your uploaded file - {uploaded.name}")
+else:
+    st.title("Upload a file to start chatting")
+    
 if uploaded:
     file_bytes = uploaded.getbuffer()
     file_hash = hashlib.md5(file_bytes).hexdigest()
